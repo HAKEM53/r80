@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>مراقب Volatility 80</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;800&display=swap">
+<style>
+  :root{--bg:#0e1419;--panel:#17202a;--line:#263341;--text:#e8eef4;--mute:#8a9bad;--up:#2fd4a7;--down:#ff6b6b;--flat:#8a9bad}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:'Tajawal',Tahoma,sans-serif;padding:16px;display:flex;justify-content:center}
+  main{width:100%;max-width:560px}
+  header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+  h1{font-size:18px;margin:0;font-weight:700}
+  #status{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--mute)}
+  #dot{width:10px;height:10px;border-radius:50%;background:var(--flat)}
+  #dot.on{background:var(--up)} #dot.err{background:var(--down)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+  #price{font-size:clamp(40px,12vw,64px);font-weight:800;direction:ltr;text-align:center;font-variant-numeric:tabular-nums;transition:color .15s}
+  #dir{text-align:center;font-size:20px;margin-top:4px;min-height:30px}
+  .up{color:var(--up)} .down{color:var(--down)} .flat{color:var(--flat)}
+  canvas{width:100%;height:200px;display:block;margin-top:14px}
+  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px;text-align:center}
+  .stat b{display:block;font-size:18px;direction:ltr;font-variant-numeric:tabular-nums}
+  .stat span{font-size:12px;color:var(--mute)}
+  button{margin-top:12px;width:100%;background:none;border:1px solid var(--line);color:var(--mute);padding:10px;border-radius:6px;font:inherit;cursor:pointer}
+  button:hover{color:var(--text);border-color:var(--mute)}
+  button:focus-visible{outline:2px solid var(--up);outline-offset:2px}
+  #log{font-size:12px;color:var(--mute);margin-top:10px;text-align:center;min-height:18px}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>مراقبة Volatility 80 (R_80)</h1>
+    <div id="status"><span id="dot"></span><span id="statusText">جاري الاتصال...</span></div>
+  </header>
+
+  <section class="panel">
+    <div id="price">—</div>
+    <div id="dir" class="flat">في انتظار أول سعر</div>
+    <canvas id="chart"></canvas>
+  </section>
+
+  <section class="stats">
+    <div class="stat"><b id="ups" class="up">0</b><span>صعود</span></div>
+    <div class="stat"><b id="downs" class="down">0</b><span>هبوط</span></div>
+    <div class="stat"><b id="flats" class="flat">0</b><span>ثبات</span></div>
+    <div class="stat"><b id="high">—</b><span>أعلى سعر</span></div>
+    <div class="stat"><b id="low">—</b><span>أدنى سعر</span></div>
+    <div class="stat"><b id="chg">—</b><span>آخر تغيّر</span></div>
+  </section>
+
+  <button id="reset">تصفير العدّادات والرسم</button>
+  <div id="log"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const MAX_POINTS = 120;
+const SERVERS = ['wss://ws.derivws.com/websockets/v3?app_id=1089','wss://ws.binaryws.com/websockets/v3?app_id=1089'];
+let ws, lastPrice = null, digits = 4, retry = 0, pingTimer = null, reconnectTimer = null;
+let prices = [], counts, high, low;
+
+function resetStats(){
+  counts = {up:0, down:0, flat:0}; high = -Infinity; low = Infinity; prices = [];
+  ['ups','downs','flats'].forEach(i => $(i).textContent = 0);
+  $('high').textContent = $('low').textContent = $('chg').textContent = '—';
+  draw();
+}
+
+function setStatus(state, text){
+  $('dot').className = state;
+  $('statusText').textContent = text;
+}
+
+function connect(){
+  clearTimeout(reconnectTimer);
+  setStatus('', 'جاري الاتصال...');
+  const url = SERVERS[retry % SERVERS.length];
+  try { ws = new WebSocket(url); } catch (err) { $('log').textContent = 'المتصفح منع الاتصال'; return; }
+
+  ws.onopen = () => {
+    retry = 0;
+    setStatus('on', 'متصل مباشرة');
+    $('log').textContent = '';
+    ws.send(JSON.stringify({ ticks: 'R_80', subscribe: 1 }));
+    clearInterval(pingTimer);
+    pingTimer = setInterval(() => ws.readyState === 1 && ws.send(JSON.stringify({ ping: 1 })), 30000);
+  };
+
+  ws.onmessage = e => {
+    const data = JSON.parse(e.data);
+    if (data.error){ setStatus('err', 'خطأ من الخادم'); $('log').textContent = data.error.message; return; }
+    if (data.msg_type === 'tick') onTick(data.tick);
+  };
+
+  ws.onerror = () => setStatus('err', 'خطأ في الاتصال');
+
+  ws.onclose = () => {
+    clearInterval(pingTimer);
+    const wait = Math.min(1000 * 2 ** Math.min(retry++, 4), 15000);
+    setStatus('err', 'انقطع الاتصال');
+    $('log').textContent = 'إعادة المحاولة خلال ' + Math.round(wait / 1000) + ' ث...';
+    reconnectTimer = setTimeout(connect, wait);
+  };
+}
+
+function onTick(t){
+  const p = t.quote;
+  if (typeof t.pip_size === 'number') digits = t.pip_size;
+  let cls = 'flat', label = '⚪ ثبات';
+  if (lastPrice !== null){
+    if (p > lastPrice){ cls = 'up'; label = '🟢 صعود'; counts.up++; }
+    else if (p < lastPrice){ cls = 'down'; label = '🔴 هبوط'; counts.down++; }
+    else counts.flat++;
+    const diff = p - lastPrice;
+    $('chg').textContent = (diff > 0 ? '+' : '') + diff.toFixed(digits);
+    $('chg').className = cls;
+  } else label = 'أول سعر';
+
+  high = Math.max(high, p); low = Math.min(low, p);
+  $('price').textContent = p.toFixed(digits);
+  $('price').className = cls;
+  $('dir').textContent = label;
+  $('dir').className = cls;
+  $('ups').textContent = counts.up;
+  $('downs').textContent = counts.down;
+  $('flats').textContent = counts.flat;
+  $('high').textContent = high.toFixed(digits);
+  $('low').textContent = low.toFixed(digits);
+
+  prices.push(p);
+  if (prices.length > MAX_POINTS) prices.shift();
+  lastPrice = p;
+  draw();
+}
+
+function draw(){
+  const c = $('chart'), dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext('2d');
+  g.scale(dpr, dpr);
+  g.clearRect(0, 0, w, h);
+  if (prices.length < 2) return;
+  const min = Math.min(...prices), max = Math.max(...prices), span = (max - min) || 1;
+  const pad = 8;
+  const x = i => (i / (MAX_POINTS - 1)) * (w - pad * 2) + pad;
+  const y = v => h - pad - ((v - min) / span) * (h - pad * 2);
+  const off = MAX_POINTS - prices.length;
+  g.strokeStyle = '#263341'; g.lineWidth = 1;
+  for (let i = 0; i < 4; i++){ const gy = pad + i * (h - pad * 2) / 3; g.beginPath(); g.moveTo(0, gy); g.lineTo(w, gy); g.stroke(); }
+  const up = prices[prices.length - 1] >= prices[0];
+  g.strokeStyle = up ? '#2fd4a7' : '#ff6b6b'; g.lineWidth = 2; g.lineJoin = 'round';
+  g.beginPath();
+  prices.forEach((v, i) => i ? g.lineTo(x(i + off), y(v)) : g.moveTo(x(i + off), y(v)));
+  g.stroke();
+  const lx = x(prices.length - 1 + off), ly = y(prices[prices.length - 1]);
+  g.fillStyle = g.strokeStyle; g.beginPath(); g.arc(lx, ly, 4, 0, 7); g.fill();
+}
+
+$('reset').onclick = () => { resetStats(); lastPrice = null; $('dir').textContent = 'في انتظار أول سعر'; $('dir').className = 'flat'; };
+window.addEventListener('resize', draw);
+resetStats();
+connect();
+</script>
+</body>
+      </html>

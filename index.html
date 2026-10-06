@@ -59,7 +59,7 @@
 <script>
 const $ = id => document.getElementById(id);
 const MAX_POINTS = 120;
-const SERVERS = ['wss://ws.derivws.com/websockets/v3?app_id=1089','wss://ws.binaryws.com/websockets/v3?app_id=1089'];
+const SERVERS = ['wss://api.derivws.com/trading/v1/options/ws/public','wss://ws.derivws.com/websockets/v3?app_id=1089'];
 let ws, lastPrice = null, digits = 4, retry = 0, pingTimer = null, reconnectTimer = null;
 let prices = [], counts, high, low;
 
@@ -92,17 +92,18 @@ function connect(){
 
   ws.onmessage = e => {
     const data = JSON.parse(e.data);
-    if (data.error){ setStatus('err', 'خطأ من الخادم'); $('log').textContent = data.error.message; return; }
-    if (data.msg_type === 'tick') onTick(data.tick);
+    const em = (data.error && data.error.message) || (data.errors && data.errors[0] && data.errors[0].message);
+    if (em){ setStatus('err', 'خطأ من الخادم'); $('log').textContent = em; return; }
+    if (data.tick) onTick(data.tick);
   };
 
   ws.onerror = () => setStatus('err', 'خطأ في الاتصال');
 
-  ws.onclose = () => {
+  ws.onclose = ev => {
     clearInterval(pingTimer);
     const wait = Math.min(1000 * 2 ** Math.min(retry++, 4), 15000);
     setStatus('err', 'انقطع الاتصال');
-    $('log').textContent = 'إعادة المحاولة خلال ' + Math.round(wait / 1000) + ' ث...';
+    $('log').textContent = 'إعادة المحاولة خلال ' + Math.round(wait / 1000) + ' ث (كود ' + ev.code + ')';
     reconnectTimer = setTimeout(connect, wait);
   };
 }
@@ -167,4 +168,4 @@ resetStats();
 connect();
 </script>
 </body>
-      </html>
+  </html>
